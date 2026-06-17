@@ -1,0 +1,47 @@
+# Visual Studio local state
+.vs/
+*.user
+*.suo
+*.VC.db
+*.VC.VC.opendb
+
+# Build outputs
+x64/
+Debug/
+Release/
+*/x64/
+*/Debug/
+*/Release/
+*.obj
+*.pdb
+*.idb
+*.ilk
+*.iobj
+*.ipdb
+*.tlog
+*.log
+*.lastbuildstate
+*.recipe
+
+# Packaged application / deployment artifacts
+dist/
+app1.1/
+*.zip
+*.exe
+*.dll
+*.qm
+
+# Local binary acquisition samples
+daochy/
+*.bin
+
+# Generated Qt files
+ui_*.h
+moc_*.cpp
+qrc_*.cpp
+.qmake.stash
+
+# System noise
+Thumbs.db
+.DS_Store
+
