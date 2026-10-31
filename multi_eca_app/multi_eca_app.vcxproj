@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -99,6 +99,7 @@
     <ClCompile Include="ImagingView.cpp" />
     <ClCompile Include="ImagingWorker.cpp" />
     <ClCompile Include="SerialWorker.cpp" />
+    <ClCompile Include="SaveWorker.cpp" />
     <QtRcc Include="multi_eca_app.qrc" />
     <QtUic Include="multi_eca_app.ui" />
     <QtMoc Include="multi_eca_app.h" />
@@ -122,6 +123,7 @@
     <ClInclude Include="SamplePoint.h" />
     <ClInclude Include="ScanBuffer.h" />
     <QtMoc Include="SerialWorker.h" />
+    <QtMoc Include="SaveWorker.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Condition="Exists('$(QtMsBuild)\qt.targets')">

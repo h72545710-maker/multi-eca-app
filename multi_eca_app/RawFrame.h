@@ -1,16 +1,20 @@
 #pragma once
 #include <QtGlobal>
+#include <QMetaType>
 
 /**
- * @brief ´®¿Ú×éÖ¡ºóµÄÔ­Ê¼Êı¾İÖ¡£¨ÉĞÎ´»»ËãµçÑ¹£©
- * Ğ­Òé£º0xFF | channelCase | amp_hi amp_lo | pha_hi pha_lo | 0x55
+ * @brief ä¸²å£ç»„å¸§åçš„åŸå§‹æ•°æ®å¸§ï¼ˆå°šæœªæ¢ç®—ç”µå‹ï¼‰
+ * åè®®ï¼š0xFF | channelCase | amp_hi amp_lo | pha_hi pha_lo | 0x55
  */
 struct RawFrame final
 {
-    quint8  channelCase = 0;   // 0..14£¨ÏÂÎ»»ú current_case£©
-    quint16 ampCode = 0;   // AD7606 ch0 Ô­Ê¼ 16-bit£¨ÎŞ·ûºÅÈİÆ÷±£´æÁ½²¹Âë£©
-    quint16 phaCode = 0;   // AD7606 ch7 Ô­Ê¼ 16-bit£¨ÎŞ·ûºÅÈİÆ÷±£´æÁ½²¹Âë£©
+    quint8  channelCase = 0;   // 0..14ï¼ˆä¸‹ä½æœº current_caseï¼‰
+    quint16 ampCode = 0;   // AD7606 ch0 åŸå§‹ 16-bitï¼ˆæ— ç¬¦å·å®¹å™¨ä¿å­˜ä¸¤è¡¥ç ï¼‰
+    quint16 phaCode = 0;   // AD7606 ch7 åŸå§‹ 16-bitï¼ˆæ— ç¬¦å·å®¹å™¨ä¿å­˜ä¸¤è¡¥ç ï¼‰
 
-    quint64 rxSeq = 0;      // ÉÏÎ»»úÖ¡ĞòºÅ£¨SerialWorker Éú³É£©
-    qint64  rxTimeNs = 0;      // ½ÓÊÕÊ±¼ä´Á£¨¿ÉÑ¡£©
+    quint64 rxSeq = 0;      // ä¸Šä½æœºå¸§åºå·ï¼ˆSerialWorker ç”Ÿæˆï¼‰
+    qint64  rxTimeNs = 0;      // æ¥æ”¶æ—¶é—´æˆ³ï¼ˆå¯é€‰ï¼‰
 };
+
+Q_DECLARE_METATYPE(RawFrame)
+

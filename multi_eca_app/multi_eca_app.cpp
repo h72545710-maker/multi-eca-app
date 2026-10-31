@@ -1,4 +1,4 @@
-﻿#include "multi_eca_app.h"
+#include "multi_eca_app.h"
 
 #include <QDebug>
 #include <QSerialPortInfo>
@@ -44,13 +44,43 @@ multi_eca_app::multi_eca_app(QWidget* parent)
     // ======================================================
     // 1) 元类型注册（跨线程信号）
     // ======================================================
+    qRegisterMetaType<RawFrame>("RawFrame");
     qRegisterMetaType<ScanBuffer>("ScanBuffer");
     qRegisterMetaType<ImagingResult>("ImagingResult");
 
     // ======================================================
     // 2) 创建 Workers（必须先 new，再 connect）
     // ======================================================
-    serialWorker = new SerialWorker(this);
+    m_serialThread = new QThread(this);
+    serialWorker = new SerialWorker();
+    serialWorker->moveToThread(m_serialThread);
+    connect(m_serialThread, &QThread::finished, serialWorker, &QObject::deleteLater);
+    m_serialThread->start();
+
+    m_saveThread = new QThread(this);
+    saveWorker = new SaveWorker();
+    saveWorker->moveToThread(m_saveThread);
+    connect(m_saveThread, &QThread::finished, saveWorker, &QObject::deleteLater);
+    connect(saveWorker, &SaveWorker::failed, this, [this](const QString& msg) {
+        ui.labelAcqHint->setText(msg);
+        ui.chkSaveRaw->setChecked(false);
+        ui.chkSaveImaging->setChecked(false);
+    }, Qt::QueuedConnection);
+    connect(saveWorker, &SaveWorker::rawClosed, this, [this](quint64 chunks, quint64 bytes) {
+        ui.labelAcqHint->setText(QString("Raw saved: chunks=%1, payload=%2 bytes").arg(chunks).arg(bytes));
+    }, Qt::QueuedConnection);
+    m_saveThread->start();
+    connect(serialWorker, &SerialWorker::portOpened, this, [this](const QString&, int) {
+        ui.labelSerialStatus->setText(QStringLiteral("已连接"));
+        ui.labelConnValue->setText("Connected");
+    }, Qt::QueuedConnection);
+    connect(serialWorker, &SerialWorker::portClosed, this, [this]() {
+        ui.labelSerialStatus->setText(QStringLiteral("未连接"));
+        ui.labelConnValue->setText("Disconnected");
+    }, Qt::QueuedConnection);
+    connect(serialWorker, &SerialWorker::portError, this, [this](const QString& msg) {
+        ui.labelSerialStatus->setText(msg);
+    }, Qt::QueuedConnection);
     dataWorker = new DataProcessWorker(this);
 
     // ======================================================
@@ -76,13 +106,14 @@ multi_eca_app::multi_eca_app(QWidget* parent)
             ui.labelConnValue->setText("Disconnected");
             return;
         }
-        const bool ok = serialWorker->openPort(port, baud);
-        ui.labelSerialStatus->setText(ok ? "已连接" : "打开失败");
-        ui.labelConnValue->setText(ok ? "Connected" : "Disconnected");
+        ui.labelSerialStatus->setText(QStringLiteral("连接中"));
+        QMetaObject::invokeMethod(serialWorker, [this, port, baud]() {
+            serialWorker->openPort(port, baud);
+        }, Qt::QueuedConnection);
         });
 
     connect(ui.btnCloseSerial, &QPushButton::clicked, this, [this]() {
-        serialWorker->closePort();
+        QMetaObject::invokeMethod(serialWorker, "closePort", Qt::QueuedConnection);
         ui.labelSerialStatus->setText("未连接");
         ui.labelConnValue->setText("Disconnected");
         });
@@ -224,7 +255,7 @@ multi_eca_app::multi_eca_app(QWidget* parent)
     // 7) 串口 → 数据处理 → 成像调度
     // ======================================================
     connect(serialWorker, &SerialWorker::rawFrameReady,
-        dataWorker, &DataProcessWorker::onRawFrame);
+        dataWorker, &DataProcessWorker::onRawFrame, Qt::QueuedConnection);
 
     connect(dataWorker, &DataProcessWorker::bufferReady,
         this, [this](const ScanBuffer& buf) {
@@ -343,19 +374,7 @@ multi_eca_app::multi_eca_app(QWidget* parent)
         this, [this](const QByteArray& raw) {
 
             // ===== 1) 原始字节流保存（一个大文件 append）=====
-            if (m_rawSaving && m_rawFile.isOpen()) {
-                // 写一条 chunk record：len + bytes
-                m_rawDs << quint32(raw.size());
-                const int wrote = m_rawDs.writeRawData(raw.constData(), raw.size());
-
-                if (wrote == raw.size() && m_rawDs.status() == QDataStream::Ok) {
-                    m_rawChunks += 1;
-                    m_rawPayloadBytes += quint64(raw.size());
-                }
-                else {
-                    qWarning() << "[RawStream] write failed, status=" << m_rawDs.status();
-                }
-            }
+            if (m_rawSaving) saveWorker->enqueueRaw(raw);
 
             // ===== 2) 你的 Hex 滚动显示（照旧）=====
             static quint64 seq = 0;
@@ -435,9 +454,18 @@ multi_eca_app::multi_eca_app(QWidget* parent)
 // ======================================================
 multi_eca_app::~multi_eca_app()
 {
-    if (m_imgThread) {
-        m_imgThread->quit();
-        m_imgThread->wait();
+    if (m_serialThread && m_serialThread->isRunning()) {
+        QMetaObject::invokeMethod(serialWorker, "closePort", Qt::BlockingQueuedConnection);
+        m_serialThread->quit();
+        m_serialThread->wait();
+    }
+    stopRawStreamSaving();
+    if (m_imgThread) { m_imgThread->quit(); m_imgThread->wait(); }
+    if (m_saveThread && m_saveThread->isRunning()) {
+        // Barrier: finish already queued raw/image writes before quitting.
+        QMetaObject::invokeMethod(saveWorker, [this]() { saveWorker->closeRaw(); }, Qt::BlockingQueuedConnection);
+        m_saveThread->quit();
+        m_saveThread->wait();
     }
 }
 
@@ -703,214 +731,33 @@ void multi_eca_app::trySaveImaging(const ImagingResult& r)
 
     const QString base = makeBaseName(r.jobSeq);
 
-    // 1) 存一份“当前显示图”PNG（最直观）
-    if (!m_lastPixmap.isNull()) {
-        const QString pngPath = dir + "/" + base + "_show.png";
-        if (savePixmapPng(pngPath, m_lastPixmap)) {
-            qDebug() << "[SaveImaging] PNG OK:" << pngPath;
-        }
-        else {
-            qWarning() << "[SaveImaging] PNG Failed:" << pngPath;
-        }
-    }
-
-    // 2) 另外可选：把 amp/pha/fused 的 Image2D 按 BIN 存一份
-    const QString binPath = dir + "/" + base + "_img.bin";
-    if (saveImageResultBin(binPath, r)) {
-        qDebug() << "[SaveImaging] BIN OK:" << binPath;
-    }
-    else {
-        qWarning() << "[SaveImaging] BIN Failed:" << binPath;
-    }
-}
-
-bool multi_eca_app::saveScanBufferBin(const QString& filePath, const ScanBuffer& buf)
-{
-    QFile f(filePath);
-    if (!f.open(QIODevice::WriteOnly)) return false;
-
-    QDataStream ds(&f);
-    ds.setByteOrder(QDataStream::LittleEndian);
-    ds.setFloatingPointPrecision(QDataStream::DoublePrecision);
-
-    // 简单文件头：用于以后读取/版本兼容
-    ds.writeRawData("ECA1", 4);          // magic
-    ds << quint32(1);                   // version
-
-    ds << quint32(buf.channelCount);
-    ds << quint32(buf.scanCount);
-    ds << quint64(buf.bufferSeq);
-    ds << qint64(buf.startTimeNs);
-    ds << qint64(buf.endTimeNs);
-
-    // channelIds
-    ds << quint32(buf.channelIds.size());
-    for (int id : buf.channelIds) ds << qint32(id);
-
-    // amp/pha 数据
-    ds << quint32(buf.amp.size());
-    for (double v : buf.amp) ds << v;
-
-    ds << quint32(buf.pha.size());
-    for (double v : buf.pha) ds << v;
-
-    return (ds.status() == QDataStream::Ok);
-}
-
-static void writeImage2D(QDataStream& ds, const Image2D& im)
-{
-    ds << qint32(im.width);
-    ds << qint32(im.height);
-
-    const quint32 n = static_cast<quint32>(im.data.size());
-    ds << n;
-    for (double v : im.data) ds << v;
-}
-
-bool multi_eca_app::saveImageResultBin(const QString& filePath, const ImagingResult& r)
-{
-    QFile f(filePath);
-    if (!f.open(QIODevice::WriteOnly)) return false;
-
-    QDataStream ds(&f);
-    ds.setByteOrder(QDataStream::LittleEndian);
-    ds.setFloatingPointPrecision(QDataStream::DoublePrecision);
-
-    ds.writeRawData("IMG1", 4);     // magic
-    ds << quint32(1);               // version
-
-    ds << quint64(r.jobSeq);
-    ds << qint64(r.startTimeNs);
-    ds << qint64(r.endTimeNs);
-
-    // amp / pha
-    writeImage2D(ds, r.ampInterp);
-    writeImage2D(ds, r.phaInterp);
-
-    // fused
-    ds << quint8(r.hasFused ? 1 : 0);
-    if (r.hasFused) writeImage2D(ds, r.fusedNorm);
-
-    return (ds.status() == QDataStream::Ok);
-}
-
-bool multi_eca_app::savePixmapPng(const QString& filePath, const QPixmap& pm)
-{
-    if (pm.isNull()) return false;
-    // 确保目录存在由上层保证
-    return pm.save(filePath, "PNG");
+    saveWorker->enqueueImage(dir + "/" + base, m_lastPixmap.toImage(), r);
 }
 
 void multi_eca_app::startRawStreamSaving()
 {
     if (m_rawSaving) return;
-
     const QString dir = currentSaveDir();
     if (!ensureDirExists(dir)) {
-        ui.labelAcqHint->setText("保存失败：无法创建目录");
-        ui.chkSaveRaw->setChecked(false);
-        return;
+        ui.labelAcqHint->setText(QStringLiteral("保存失败：无法创建目录"));
+        ui.chkSaveRaw->setChecked(false); return;
     }
-
-    // 采集参数（你要写进 header）
-    m_rawBaud = ui.comboBaud->currentText().toInt();
-    m_rawPtsPerCh = ui.spinPointsPerChannel->value();
-    m_rawChannelCount = ui.spinChannelCount->value();
-
-    const QString ts = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz");
-    const QString filePath = dir + QString("/%1_rawstream.bin").arg(ts);
-
-    m_rawFile.setFileName(filePath);
-    if (!m_rawFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        ui.labelAcqHint->setText(QString("保存失败：%1").arg(m_rawFile.errorString()));
-        ui.chkSaveRaw->setChecked(false);
-        return;
-    }
-
-    // 绑定数据流
-    m_rawDs.setDevice(&m_rawFile);
-    m_rawDs.setByteOrder(QDataStream::LittleEndian);
-
-    // 写 header
-    m_rawStartTimeNs = QDateTime::currentMSecsSinceEpoch() * 1000000LL;
-
-    m_rawChunks = 0;
-    m_rawPayloadBytes = 0;
-
-    // magic
-    m_rawDs.writeRawData("RAW1", 4);
-    // version
-    m_rawDs << quint32(1);
-
-    // headerBytes（先占位，等写完我们再回填也行；这里直接写固定值）
-    const quint32 headerBytes = 4 + 4 + 4 + 8 + 8 + 4 + 4 + 4 + 8 + 8 + 32;
-    m_rawDs << quint32(headerBytes);
-
-    // startTimeNs
-    m_rawDs << qint64(m_rawStartTimeNs);
-
-    // endTimeNs（占位，记住位置方便 stop 回填）
-    m_offEndTimeNs = m_rawFile.pos();
-    m_rawDs << qint64(0);
-
-    // baud / ptsPerCh / channelCount
-    m_rawDs << quint32(m_rawBaud);
-    m_rawDs << quint32(m_rawPtsPerCh);
-    m_rawDs << quint32(m_rawChannelCount);
-
-    // totalChunks（占位）
-    m_offTotalChunks = m_rawFile.pos();
-    m_rawDs << quint64(0);
-
-    // totalBytes（占位）
-    m_offTotalBytes = m_rawFile.pos();
-    m_rawDs << quint64(0);
-
-    // reserved 32 bytes
-    QByteArray zeros(32, 0);
-    m_rawDs.writeRawData(zeros.constData(), zeros.size());
-
-    if (m_rawDs.status() != QDataStream::Ok) {
-        ui.labelAcqHint->setText("保存失败：写 header 出错");
-        m_rawFile.close();
-        ui.chkSaveRaw->setChecked(false);
-        return;
-    }
-
-    m_rawSaving = true;
-    ui.labelAcqHint->setText(QString("开始保存原始字节流：%1").arg(filePath));
+    const QString path = dir + "/" + QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz") + "_rawstream.bin";
+    const int baud = ui.comboBaud->currentText().toInt();
+    const int points = ui.spinPointsPerChannel->value();
+    const int channels = ui.spinChannelCount->value();
+    bool ok = false;
+    QMetaObject::invokeMethod(saveWorker, [this, path, baud, points, channels, &ok]() {
+        ok = saveWorker->openRaw(path, baud, points, channels);
+    }, Qt::BlockingQueuedConnection);
+    m_rawSaving = ok;
+    if (!ok) ui.chkSaveRaw->setChecked(false);
+    else ui.labelAcqHint->setText(QStringLiteral("开始保存：") + path);
 }
 
 void multi_eca_app::stopRawStreamSaving()
 {
     if (!m_rawSaving) return;
     m_rawSaving = false;
-
-    const qint64 endTimeNs = QDateTime::currentMSecsSinceEpoch() * 1000000LL;
-
-    if (m_rawFile.isOpen()) {
-        // 回填 header 里的 endTime / 统计
-        if (m_offEndTimeNs >= 0) {
-            m_rawFile.seek(m_offEndTimeNs);
-            m_rawDs << qint64(endTimeNs);
-        }
-        if (m_offTotalChunks >= 0) {
-            m_rawFile.seek(m_offTotalChunks);
-            m_rawDs << quint64(m_rawChunks);
-        }
-        if (m_offTotalBytes >= 0) {
-            m_rawFile.seek(m_offTotalBytes);
-            m_rawDs << quint64(m_rawPayloadBytes);
-        }
-
-        // 回到末尾再 flush/close
-        m_rawFile.seek(m_rawFile.size());
-        m_rawFile.flush();
-        m_rawFile.close();
-    }
-
-    ui.labelAcqHint->setText(
-        QString("停止保存 rawstream：chunks=%1, payload=%2 bytes")
-        .arg(m_rawChunks).arg(m_rawPayloadBytes)
-    );
+    QMetaObject::invokeMethod(saveWorker, [this]() { saveWorker->closeRaw(); }, Qt::BlockingQueuedConnection);
 }
