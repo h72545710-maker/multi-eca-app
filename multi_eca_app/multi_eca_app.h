@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <QtWidgets/QMainWindow>
 #include <QImage>
@@ -10,6 +10,7 @@
 
 #include "ui_multi_eca_app.h"
 #include "SerialWorker.h"
+#include "SaveWorker.h"
 #include "DataProcessWorker.h"
 #include "ImagingWorker.h"
 #include "ScanBuffer.h"
@@ -45,6 +46,9 @@ private:
     ImagingWorker* imagingWorker = nullptr;
 
     QThread* m_imgThread = nullptr;
+    QThread* m_serialThread = nullptr;
+    QThread* m_saveThread = nullptr;
+    SaveWorker* saveWorker = nullptr;
 
     // ========== 成像调度（latest-only queue） ==========
     bool m_imgBusy = false;
@@ -93,34 +97,9 @@ private:
    // void trySaveRaw(const ScanBuffer& buf);
     void trySaveImaging(const ImagingResult& r);
 
-    bool saveScanBufferBin(const QString& filePath, const ScanBuffer& buf);
-    bool saveImageResultBin(const QString& filePath, const ImagingResult& r);
-    bool savePixmapPng(const QString& filePath, const QPixmap& pm);
 
 private:
-    QFile   m_rawFile;
-    bool    m_rawSaving = false;
-    quint64 m_rawBytesWritten = 0;
-
+    bool m_rawSaving = false;
     void startRawStreamSaving();
     void stopRawStreamSaving();
-
-
-    QDataStream m_rawDs;
-
-
-    quint64 m_rawChunks = 0;
-    quint64 m_rawPayloadBytes = 0;
-
-    qint64  m_rawStartTimeNs = 0;
-
-    // 头内需要回填的位置（用来 stop 时 seek 回去写 endTime/统计）
-    qint64 m_offEndTimeNs = -1;
-    qint64 m_offTotalChunks = -1;
-    qint64 m_offTotalBytes = -1;
-
-    // 可选：保存开始时的参数（写入 header 用）
-    int m_rawBaud = 0;
-    int m_rawPtsPerCh = 0;
-    int m_rawChannelCount = 0;
 };
